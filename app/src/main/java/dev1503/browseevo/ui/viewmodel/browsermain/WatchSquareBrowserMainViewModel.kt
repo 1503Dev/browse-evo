@@ -157,7 +157,8 @@ class WatchSquareBrowserMainViewModel(activity: MainActivity) : CommonBrowserMai
         showOverlay(overlay)
     }
 
-    override fun showDownloadConfirm(url: String, filename: String?, contentLength: Long) {
+    override fun showDownloadConfirm(url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) {
+        if (maybeAutoDownload(url, contentLength, body)) return
         requestDownloadPermissions()
         DownloadController.init(activity)
 
@@ -169,21 +170,32 @@ class WatchSquareBrowserMainViewModel(activity: MainActivity) : CommonBrowserMai
             sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(contentLength)}"
         }
         val client = OkHttpClient()
-        client.newCall(Request.Builder().url(url).head().build())
-            .enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {}
-                override fun onResponse(call: Call, response: Response) {
-                    response.use {
-                        val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
-                        Handler(Looper.getMainLooper()).post {
-                            if (length > 0) sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+        // 已有原始响应流时不发 HEAD 请求：那是对下载地址的额外请求，
+        // 可能消耗掉一次性链接。
+        if (body == null) {
+            client.newCall(Request.Builder().url(url).head().build())
+                .enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {}
+                    override fun onResponse(call: Call, response: Response) {
+                        response.use {
+                            val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
+                            Handler(Looper.getMainLooper()).post {
+                                if (length > 0) sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+                            }
                         }
                     }
-                }
-            })
+                })
+        }
 
+        var consumedBody = false
         var overlay: View? = null
-        val dismiss: () -> Unit = { overlay?.let { dismissOverlay(it) } }
+        val dismiss: () -> Unit = {
+            // 未交给下载器的响应流直接关闭，释放连接
+            if (!consumedBody) {
+                runCatching { body?.close() }
+            }
+            overlay?.let { dismissOverlay(it) }
+        }
 
         val buttonRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -204,7 +216,8 @@ class WatchSquareBrowserMainViewModel(activity: MainActivity) : CommonBrowserMai
                 paused = false,
                 timestamp = 0L
             )
-            DownloadController.start(activity, record)
+            consumedBody = true
+            DownloadController.start(activity, record, body)
             Snackbar.make(_view, "已开始下载", Snackbar.LENGTH_LONG)
                 .setAction("查看") {
                     Utils.openDownloadManagerActivity(activity)

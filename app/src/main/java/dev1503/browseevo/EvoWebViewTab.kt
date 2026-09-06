@@ -6,6 +6,10 @@ import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.FrameLayout
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev1503.browseevo.data.HistoryManager
 import dev1503.browseevo.evo.EvoUri
 import dev1503.browseevo.ui.widgets.EvoWebViewWrapper
@@ -64,15 +68,15 @@ class EvoWebViewTab(
     var onNewTabRequested: ((GeckoSession) -> Unit)? = null
     var onTitleChanged: ((String?) -> Unit)? = null
     var onNavigationStateChanged: (() -> Unit)? = null
-    var onNavigationRequested: ((GeckoSession, String) -> Unit)? = null
     var onPageStarted: ((String?) -> Unit)? = null
     var onPageStopped: ((Boolean) -> Unit)? = null
     var onProgressChanged: ((Int) -> Unit)? = null
     var onLoadingChanged: ((Boolean) -> Unit)? = null
     var onExternalSchemeRequested: ((String) -> Unit)? = null
     var onNavigateRequested: ((String) -> Unit)? = null
-    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long) -> Unit)? = null
+    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
+    var onFullScreen: ((fullScreen: Boolean) -> Unit)? = null
 
     val currentUrl: String
         get() = currentSession?.let { urlMap[it] } ?: ""
@@ -201,22 +205,10 @@ class EvoWebViewTab(
                     }
                     if (isDownloadUrl(request.uri)) {
                         Log.w(TAG, "download intercepted by extension: ${request.uri}")
-                        onDownloadRequested?.invoke(request.uri, null, -1L)
+                        onDownloadRequested?.invoke(request.uri, null, -1L, null)
                         return GeckoResult.fromValue(AllowOrDeny.DENY)
                     }
-                    Log.w(TAG, "target current")
-                    session.stop()
-                    val newSession = createSession()
-                    pendingSessions.add(newSession)
-                    loadingSessions.add(newSession)
-                    sessionStack.add(newSession)
-                    forwardStack.clear()
-                    setPendingTarget(newSession, translateToEvo(request.uri))
-                    onNavigationStateChanged?.invoke()
-                    onTitleChanged?.invoke(currentTitle)
-                    notifyLoadingChanged()
-                    onNavigationRequested?.invoke(newSession, request.uri)
-                    return GeckoResult.fromValue(AllowOrDeny.DENY)
+                    return GeckoResult.fromValue(AllowOrDeny.ALLOW)
                 }
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
@@ -309,17 +301,26 @@ class EvoWebViewTab(
 
             override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
                 Log.w(TAG, "onExternalResponse: ${response.uri} headers=${response.headers}")
+                response.setReadTimeoutMillis(20_000)
                 val contentLength = response.headers["Content-Length"]?.toLongOrNull() ?: -1L
                 val disposition = response.headers["Content-Disposition"]
                 val filename = disposition?.let { header ->
                     Regex("""filename\*?=(?:UTF-8''|")?([^";]+)""", RegexOption.IGNORE_CASE)
                         .find(header)?.groupValues?.get(1)
                 }?.let { Utils.decodeUrlEncoded(it) }
-                onDownloadRequested?.invoke(response.uri, filename, contentLength)
+                // body 是触发下载时的原始响应流：交给下载器直接落盘，
+                // 避免对（可能一次性的）下载地址发起第二次请求。
+                onDownloadRequested?.invoke(response.uri, filename, contentLength, response.body)
             }
 
             override fun onContextMenu(session: GeckoSession, screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) {
                 onContextMenu?.invoke(screenX, screenY, element)
+            }
+
+            override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+                if (session == currentSession) {
+                    onFullScreen?.invoke(fullScreen)
+                }
             }
         }
     }
@@ -338,7 +339,122 @@ class EvoWebViewTab(
                 }
                 return result
             }
+
+            override fun onAlertPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.AlertPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) {
+                    setMessage(prompt.message ?: "")
+                    setPositiveButton(android.R.string.ok, null)
+                }
+                return result
+            }
+
+            override fun onButtonPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.ButtonPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) { settle ->
+                    setMessage(prompt.message ?: "")
+                    setPositiveButton(android.R.string.ok) { _, _ ->
+                        settle { prompt.confirm(GeckoSession.PromptDelegate.ButtonPrompt.Type.POSITIVE) }
+                    }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onTextPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.TextPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) { settle ->
+                    prompt.message?.takeIf { it.isNotBlank() }?.let { setMessage(it) }
+                    val pad = (16 * context.resources.displayMetrics.density).toInt()
+                    val container = FrameLayout(context).apply {
+                        setPadding(pad, pad / 2, pad, 0)
+                    }
+                    val input = EditText(context).apply {
+                        setText(prompt.defaultValue ?: "")
+                    }
+                    container.addView(
+                        input,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    setView(container)
+                    setPositiveButton(android.R.string.ok) { _, _ ->
+                        settle { prompt.confirm(input.text?.toString() ?: "") }
+                    }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onRepostConfirmPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.RepostConfirmPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result, dismissAction = { prompt.confirm(AllowOrDeny.DENY) }) { settle ->
+                    setMessage("要重新提交表单数据吗？")
+                    setPositiveButton("重新提交") { _, _ -> settle { prompt.confirm(AllowOrDeny.ALLOW) } }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onBeforeUnloadPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.BeforeUnloadPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result, dismissAction = { prompt.confirm(AllowOrDeny.DENY) }) { settle ->
+                    setMessage("离开此页面吗？已输入的内容可能不会被保存。")
+                    setPositiveButton("离开") { _, _ -> settle { prompt.confirm(AllowOrDeny.ALLOW) } }
+                    setNegativeButton("留在此页", null)
+                }
+                return result
+            }
         }
+    }
+
+    private fun dialogTitle(prompt: GeckoSession.PromptDelegate.BasePrompt): String {
+        return prompt.title?.takeIf { it.isNotBlank() }
+            ?: currentTitle.ifBlank { "提示" }
+    }
+
+    private fun showJsDialog(
+        prompt: GeckoSession.PromptDelegate.BasePrompt,
+        result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+        dismissAction: () -> GeckoSession.PromptDelegate.PromptResponse = { prompt.dismiss() },
+        configure: MaterialAlertDialogBuilder.(onAction: (() -> GeckoSession.PromptDelegate.PromptResponse) -> Unit) -> Unit
+    ) {
+        var handled = false
+        val settle: (() -> GeckoSession.PromptDelegate.PromptResponse) -> Unit = { action ->
+            if (!handled) {
+                handled = true
+                try {
+                    result.complete(action())
+                } catch (e: Exception) {
+                    Log.w(TAG, "js dialog failed", e)
+                    runCatching { result.complete(prompt.dismiss()) }
+                }
+            }
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(dialogTitle(prompt))
+            .setOnDismissListener { settle(dismissAction) }
+            .apply { configure(settle) }
+            .create()
+        dialog.setCanceledOnTouchOutside(false)
+        dialog.show()
     }
 
     private fun createProgressDelegate(): GeckoSession.ProgressDelegate {
@@ -346,6 +462,12 @@ class EvoWebViewTab(
             override fun onPageStart(session: GeckoSession, url: String) {
                 loadingSessions.add(session)
                 if (session == currentSession) {
+                    if (pendingTraversalCount > 0) {
+                        pendingTraversalCount--
+                    } else {
+                        clearForwardSessions()
+                        onNavigationStateChanged?.invoke()
+                    }
                     onPageStarted?.invoke(url)
                     notifyLoadingChanged()
                 }
@@ -372,16 +494,29 @@ class EvoWebViewTab(
     }
 
     fun pushSession(session: GeckoSession) {
+        clearForwardSessions()
         sessionStack.add(session)
-        forwardStack.clear()
         onNavigationStateChanged?.invoke()
         onTitleChanged?.invoke(currentTitle)
         notifyLoadingChanged()
     }
 
+    private fun clearForwardSessions() {
+        for (session in forwardStack) {
+            pendingSessions.remove(session)
+            loadingSessions.remove(session)
+            pendingTargetUrls.remove(session)
+            session.close()
+        }
+        forwardStack.clear()
+    }
+
+    private var pendingTraversalCount = 0
+
     fun goBack(): GeckoSession? {
         val session = currentSession ?: return null
         if (canGoBackMap[session] == true) {
+            pendingTraversalCount++
             session.goBack()
             return session
         }
@@ -397,6 +532,7 @@ class EvoWebViewTab(
     fun goForward(): GeckoSession? {
         val session = currentSession ?: return null
         if (canGoForwardMap[session] == true) {
+            pendingTraversalCount++
             session.goForward()
             return session
         }
@@ -692,7 +828,7 @@ class EvoWebViewTab(
             pendingTargetUrls.remove(session)
         }
         sessionStack.clear()
-        forwardStack.clear()
+        clearForwardSessions()
         pendingSessions.clear()
         errorSessions.clear()
         canGoBackMap.clear()

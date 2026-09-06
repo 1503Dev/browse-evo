@@ -169,6 +169,33 @@ object DownloadController {
         }
     }
 
+    /**
+     * 自动开始下载。优先使用触发下载时的原始响应流 [body]（可能是浏览器已有的连接，
+     * 直接落盘，不重新请求下载地址——某些下载链接是一次性的）；
+     * 没有响应流（如按扩展名拦截的下载）才回退为重新请求 URL。
+     */
+    fun autoDownload(
+        context: Context,
+        url: String,
+        filename: String?,
+        contentLength: Long,
+        body: java.io.InputStream?,
+    ): DownloadRecord {
+        val name = filename ?: suggestFilename(url)
+        val file = uniqueDestination(publicDownloadDir(), name)
+        val record = DownloadRecord(
+            filename = file.name,
+            url = url,
+            path = file.absolutePath,
+            totalBytes = contentLength,
+            savedBytes = 0L,
+            paused = false,
+            timestamp = 0L
+        )
+        start(context, record, body)
+        return record
+    }
+
     fun publicDownloadDir(): File {
         val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         if (!dir.exists()) dir.mkdirs()
@@ -193,7 +220,7 @@ object DownloadController {
     private val activePaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     @Synchronized
-    fun start(context: Context, original: DownloadRecord): Boolean {
+    fun start(context: Context, original: DownloadRecord, body: java.io.InputStream? = null): Boolean {
         init(context)
         val manager = DownloadManager(appContext)
         var record = original.copy(timestamp = System.currentTimeMillis(), paused = false)
@@ -213,7 +240,115 @@ object DownloadController {
         }
         activePaths.add(candidate.absolutePath)
         manager.add(record)
-        return launchDownload(record)
+        return if (body != null) launchStreamDownload(record, body) else launchDownload(record)
+    }
+
+    /**
+     * 直接消费触发下载时的原始响应流并落盘，不再向下载地址发起新请求
+     * （防止一次性链接第二次请求失效）。
+     * 暂停时会停止读取并关闭流；之后的"恢复"只能重新请求 URL，
+     * 对一次性链接会失败，这是流式下载的固有限制。
+     */
+    private fun launchStreamDownload(record: DownloadRecord, body: java.io.InputStream): Boolean {
+        android.util.Log.i(TAG, "launchStreamDownload url=${record.url} path=${record.path}")
+        activeDownloads.incrementAndGet()
+        val pauseFlag = AtomicBoolean(false)
+        pauseFlags[record.timestamp] = pauseFlag
+        DownloadNotifier.notifyProgress(appContext, record)
+
+        val finalFile = File(record.path)
+        finalFile.parentFile?.mkdirs()
+        val partFile = File(record.path + PART_SUFFIX)
+
+        val manager = DownloadManager(appContext)
+        var lastNotify = 0L
+        var lastCsvWrite = 0L
+
+        // 占位请求：让下载列表的 isActive/pause/cancel 正确识别本任务；
+        // Get.create 只保存 URL 字符串不会发起请求，其 cancel() 对未启动请求是空操作。
+        val placeholderRequest = Get.create(record.url)
+        activeRequests[record.timestamp] = placeholderRequest
+
+        fun cleanup() {
+            pauseFlags.remove(record.timestamp)
+            activeRequests.remove(record.timestamp, placeholderRequest)
+            activePaths.remove(record.path)
+            if (activeDownloads.decrementAndGet() <= 0 && ::appContext.isInitialized) {
+                DownloadService.stop(appContext)
+            }
+        }
+
+        kotlin.concurrent.thread(name = "evo-stream-download-${record.timestamp}") {
+            var saved = 0L
+            try {
+                val buf = ByteArray(64 * 1024)
+                body.use { input ->
+                    FileOutputStream(partFile).use { output ->
+                        while (!pauseFlag.get()) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            output.write(buf, 0, n)
+                            saved += n
+                            val now = System.currentTimeMillis()
+                            if (now - lastNotify > 500) {
+                                lastNotify = now
+                                val updated = record.copy(savedBytes = saved)
+                                DownloadNotifier.notifyProgress(appContext, updated)
+                                dispatchProgress(updated)
+                            }
+                            if (now - lastCsvWrite > 3000) {
+                                lastCsvWrite = now
+                                manager.update(record.copy(savedBytes = saved))
+                            }
+                        }
+                    }
+                }
+                // cancel() 会移除 activePaths；据此区分"取消"与"暂停"。
+                if (pauseFlag.get() && activePaths.contains(record.path)) {
+                    val pausedRecord = record.copy(savedBytes = saved, paused = true, error = "")
+                    manager.update(pausedRecord)
+                    DownloadNotifier.notifyPaused(appContext, pausedRecord)
+                    dispatchProgress(pausedRecord)
+                } else if (!pauseFlag.get()) {
+                    if (!partFile.renameTo(finalFile) && partFile.exists()) {
+                        partFile.copyTo(finalFile, overwrite = true)
+                        partFile.delete()
+                    }
+                    val finishedRecord = record.copy(
+                        totalBytes = saved,
+                        savedBytes = saved,
+                        paused = false,
+                        error = ""
+                    )
+                    manager.update(finishedRecord)
+                    DownloadNotifier.notifyCompleted(appContext, finishedRecord)
+                    dispatchProgress(finishedRecord)
+                }
+            } catch (e: java.net.SocketTimeoutException) {
+                android.util.Log.w(TAG, "stream download timed out", e)
+                val failedRecord = record.copy(
+                    savedBytes = saved,
+                    paused = true,
+                    error = "下载超时"
+                )
+                manager.update(failedRecord)
+                DownloadNotifier.notifyPaused(appContext, failedRecord)
+                dispatchProgress(failedRecord)
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "stream download failed", e)
+                val failedRecord = record.copy(
+                    savedBytes = saved,
+                    paused = true,
+                    error = e.message?.takeIf { it.isNotBlank() } ?: "下载失败"
+                )
+                manager.update(failedRecord)
+                DownloadNotifier.notifyPaused(appContext, failedRecord)
+                dispatchProgress(failedRecord)
+            } finally {
+                cleanup()
+            }
+        }
+        return true
     }
 
     private fun pathTaken(candidate: File): Boolean =

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    <SwitchPreferenceCompat
+        android:key="download/auto_download"
+        android:title="自动开始下载"
+        android:defaultValue="false"
+        android:summary="触发下载请求时不再询问，直接开始下载" />
+</androidx.preference.PreferenceScreen>

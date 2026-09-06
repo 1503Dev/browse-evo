@@ -19,6 +19,7 @@ object Utils {
 
     const val KEY_DARK_MODE = "appearance/dark_mode"
     const val KEY_PC_MODE = "browse/pc_mode"
+    const val KEY_AUTO_DOWNLOAD = "download/auto_download"
 
     const val DARK_MODE_OFF = 0
     const val DARK_MODE_ON = 1
@@ -171,9 +172,9 @@ object Utils {
 
     fun looksLikeHost(input: String): Boolean {
         if (input.contains("://") || input.any { it.isWhitespace() }) return false
-        return Regex("""^(\d{1,3}\.){3}\d{1,3}(:\d+)?(/.*)?$""").matches(input) ||
-            Regex("""^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+(:\d+)?(/.*)?$""").matches(input) ||
-            Regex("""^localhost(:\d+)?(/.*)?$""", RegexOption.IGNORE_CASE).matches(input)
+        return Regex("""^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#].*)?$""").matches(input) ||
+            Regex("""^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+(:\d+)?([/?#].*)?$""").matches(input) ||
+            Regex("""^localhost(:\d+)?([/?#].*)?$""", RegexOption.IGNORE_CASE).matches(input)
     }
 
     fun schemeOf(input: String): String? {

@@ -14,6 +14,7 @@ class SettingsFragment : PreferenceFragmentCompat(), Preference.OnPreferenceClic
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         setPreferencesFromResource(R.xml.preferences_settings, rootKey)
         findPreference<Preference>("appearance")?.onPreferenceClickListener = this
+        findPreference<Preference>("download")?.onPreferenceClickListener = this
         findPreference<Preference>("about")?.onPreferenceClickListener = this
         val dataStore = EvoDataStore(requireActivity())
         preferenceManager.preferenceDataStore = dataStore
@@ -22,6 +23,10 @@ class SettingsFragment : PreferenceFragmentCompat(), Preference.OnPreferenceClic
     override fun onPreferenceClick(preference: Preference): Boolean {
         if (preference.key == "appearance") {
             enter(AppearanceFragment())
+            return true
+        }
+        if (preference.key == "download") {
+            enter(DownloadSettingsFragment())
             return true
         }
         if (preference.key == "about") {

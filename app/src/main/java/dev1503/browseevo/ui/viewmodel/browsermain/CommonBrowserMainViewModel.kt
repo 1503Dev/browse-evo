@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -16,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.LayoutInflater
@@ -29,11 +31,16 @@ import android.widget.LinearLayout
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.widget.EditText
+import android.widget.ArrayAdapter
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -52,12 +59,18 @@ import dev1503.browseevo.download.DownloadRecord
 import dev1503.browseevo.ui.widgets.BottomSheetDialogBuilder
 import dev1503.browseevo.ui.widgets.EvoPopupMenu
 import dev1503.browseevo.ui.widgets.MenuBottomSheet
+import dev1503.materialpopups.widgets.menuitem.MenuItem
+import dev1503.materialpopups.widgets.popup.MenuPopup
+import dev1503.materialpopups.widgets.popup.Popup
+import org.mozilla.geckoview.GeckoSession
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
 import java.io.IOException
+import java.net.URLEncoder
 
 abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainViewModel(activity) {
     protected abstract val layoutResId: Int
@@ -93,11 +106,12 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         layoutBottomBar = _view.findViewById(R.id.layoutBottomBar)
         urlEditBar = _view.findViewById(R.id.layoutUrlEditOverlay)
         textTabCount = _view.findViewById(R.id.textTabCount)
+        suggestionList = _view.findViewById(R.id.suggestionList)
 
         super.onCreate(savedInstanceState)
 
-        webViewWrapper.onDownloadRequested = { url, filename, length ->
-            showDownloadConfirm(url, filename, length)
+        webViewWrapper.onDownloadRequested = { url, filename, length, body ->
+            showDownloadConfirm(url, filename, length, body)
         }
 
         btnTabs.setOnClickListener { showTabsSheet() }
@@ -110,6 +124,7 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         webViewWrapper.onExternalSchemeRequested = { uri -> promptExternalScheme(uri) }
         webViewWrapper.onNavigateRequested = { value -> navigate(value) }
         webViewWrapper.onTabCreated = { bounceTabsButton() }
+        webViewWrapper.onFullScreen = { fullScreen -> handlePageFullScreen(fullScreen) }
 
         urlEditOverlay.visibility = View.GONE
         applyDefaultColor()
@@ -139,6 +154,7 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 if (!programmaticSet) {
                     userEditedUrl = true
                 }
+                scheduleSearchSuggestions(s?.toString().orEmpty())
             }
         })
         editTextUrl.setOnEditorActionListener { _, actionId, _ ->
@@ -191,6 +207,10 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     }
 
     override fun handleBackPressed(): Boolean {
+        if (isPageFullScreen) {
+            webViewWrapper.activeTab?.currentSession?.exitFullScreen()
+            return true
+        }
         if (dismissTopOverlay()) return true
         if (closeUrlEditOverlayOnBack &&
             ::urlEditOverlay.isInitialized &&
@@ -271,6 +291,11 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     }
 
     private fun promptExternalScheme(input: String) {
+        val lower = input.lowercase()
+        if (lower.startsWith("intent:") || lower.startsWith("android-app:")) {
+            launchIntentUri(input)
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(input))
         if (intent.resolveActivity(activity.packageManager) != null) {
             val builder = Snackbar.make(_view, "是否交给外部应用打开？", Snackbar.LENGTH_LONG)
@@ -283,6 +308,51 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 }
             }
             builder.show()
+        } else {
+            val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
+            if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+            builder.show()
+        }
+    }
+
+    private fun launchIntentUri(intentUri: String) {
+        val intent = org.mozilla.gecko.util.IntentUtils.getSafeIntent(Uri.parse(intentUri))
+        val fallback = intent?.getStringExtra("browser_fallback_url")
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+        if (intent == null || intent.`package` == activity.packageName) {
+            if (fallback != null) {
+                webViewWrapper.goToUrl(fallback)
+            } else {
+                val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
+                if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+                builder.show()
+            }
+            return
+        }
+        val resolvable = try {
+            intent.resolveActivity(activity.packageManager) != null
+        } catch (e: Exception) {
+            false
+        }
+        if (resolvable) {
+            val builder = Snackbar.make(_view, "是否打开外部应用？", Snackbar.LENGTH_LONG)
+            if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+            builder.setAction("允许") {
+                try {
+                    activity.startActivity(intent)
+                } catch (e: Exception) {
+                    if (fallback != null) {
+                        webViewWrapper.goToUrl(fallback)
+                    } else {
+                        val fail = Snackbar.make(_view, "无法打开外部应用", Snackbar.LENGTH_SHORT)
+                        if (useSnackbarAnchor) fail.setAnchorView(layoutBottomBar)
+                        fail.show()
+                    }
+                }
+            }
+            builder.show()
+        } else if (fallback != null) {
+            webViewWrapper.goToUrl(fallback)
         } else {
             val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
             if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
@@ -314,6 +384,9 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     private fun hideUrlEditOverlay() {
         if (urlEditOverlay.visibility != View.VISIBLE) return
         editTextUrl.clearFocus()
+        suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+        pendingSuggestQuery = null
+        hideSearchSuggestions()
         val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(editTextUrl.windowToken, 0)
         urlEditOverlay.animate()
@@ -321,6 +394,107 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
             .setDuration(200L)
             .withEndAction { urlEditOverlay.visibility = View.GONE }
             .start()
+    }
+
+    private companion object {
+        const val SUGGEST_DEBOUNCE_MS = 300L
+        const val SUGGEST_MIN_INTERVAL_MS = 1000L
+        const val SUGGEST_MAX_COUNT = 5
+    }
+
+    private var suggestionList: ListView? = null
+    private var pendingSuggestQuery: String? = null
+    private var lastSuggestQuery: String? = null
+    private var lastSuggestFetchAt = 0L
+    private val suggestionHandler = Handler(Looper.getMainLooper())
+    private val suggestionFetchRunnable = Runnable {
+        pendingSuggestQuery?.let { fetchSearchSuggestions(it) }
+    }
+    private val suggestionClient by lazy { OkHttpClient() }
+
+    private fun scheduleSearchSuggestions(query: String) {
+        val container = suggestionList ?: return
+        suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+        if (query.isBlank() || schemeOf(query) != null) {
+            pendingSuggestQuery = null
+            hideSearchSuggestions()
+            return
+        }
+        pendingSuggestQuery = query
+        suggestionHandler.postDelayed(suggestionFetchRunnable, SUGGEST_DEBOUNCE_MS)
+    }
+
+    private fun fetchSearchSuggestions(query: String) {
+        if (query != editTextUrl.text?.toString()) return
+        if (query == lastSuggestQuery) return
+        val elapsed = System.currentTimeMillis() - lastSuggestFetchAt
+        if (elapsed < SUGGEST_MIN_INTERVAL_MS) {
+            pendingSuggestQuery = query
+            suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+            suggestionHandler.postDelayed(suggestionFetchRunnable, SUGGEST_MIN_INTERVAL_MS - elapsed)
+            return
+        }
+        lastSuggestFetchAt = System.currentTimeMillis()
+        lastSuggestQuery = query
+        suggestionClient.newCall(
+            Request.Builder()
+                .url("https://api.bing.com/osjson.aspx?query=" + URLEncoder.encode(query, "UTF-8"))
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+        ).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    val body = runCatching { it.body?.string() }.getOrNull() ?: return
+                    val items = parseSearchSuggestions(body)
+                    Handler(Looper.getMainLooper()).post {
+                        if (editTextUrl.text?.toString() != query) return@post
+                        showSearchSuggestions(items)
+                    }
+                }
+            }
+        })
+    }
+
+    private fun parseSearchSuggestions(body: String): List<String> {
+        return runCatching {
+            val suggestions = JSONArray(body).optJSONArray(1) ?: return emptyList()
+            (0 until suggestions.length())
+                .map { suggestions.optString(it) }
+                .filter { it.isNotBlank() }
+                .take(SUGGEST_MAX_COUNT)
+        }.getOrDefault(emptyList())
+    }
+
+    private fun showSearchSuggestions(items: List<String>) {
+        val container = suggestionList ?: return
+        if (items.isEmpty()) {
+            container.visibility = View.GONE
+            container.adapter = null
+            return
+        }
+        container.adapter = object : ArrayAdapter<String>(
+            activity,
+            android.R.layout.simple_list_item_1,
+            items
+        ) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                view.setTextColor(0xFF1D1B20.toInt())
+                return view
+            }
+        }
+        container.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
+            val item = items[position]
+            hideUrlEditOverlay()
+            navigate(item)
+        }
+        container.visibility = View.VISIBLE
+    }
+
+    private fun hideSearchSuggestions() {
+        suggestionList?.visibility = View.GONE
+        suggestionList?.adapter = null
     }
 
     private fun showTitleBarMenu() {
@@ -410,7 +584,34 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     final override fun onActiveTabChanged(index: Int) {
         super.onActiveTabChanged(index)
         updateTabCountBadge()
+        if (isPageFullScreen) {
+            handlePageFullScreen(false)
+        }
         extractAndApplyWebColor()
+    }
+
+    private var isPageFullScreen = false
+    private var fullscreenPreviousOrientation: Int? = null
+
+    private fun handlePageFullScreen(fullScreen: Boolean) {
+        if (isPageFullScreen == fullScreen) return
+        isPageFullScreen = fullScreen
+        val controller = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+        if (fullScreen) {
+            fullscreenPreviousOrientation = activity.requestedOrientation
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            layoutTopBar.visibility = View.GONE
+            layoutBottomBar.visibility = View.GONE
+        } else {
+            fullscreenPreviousOrientation?.let { activity.requestedOrientation = it }
+            fullscreenPreviousOrientation = null
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            layoutTopBar.visibility = View.VISIBLE
+            layoutBottomBar.visibility = View.VISIBLE
+        }
     }
 
     private fun extractAndApplyWebColor() {
@@ -588,7 +789,109 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         }
     }
 
-    protected open fun showDownloadConfirm(url: String, filename: String?, contentLength: Long) {
+    /**
+     * 开启"自动开始下载"时跳过确认对话框直接处理下载请求；
+     * 返回 false 表示未启用，调用方继续走询问流程。
+     * [body] 为触发下载时的原始响应流，直接落盘以复用该连接。
+     */
+    protected fun maybeAutoDownload(url: String, contentLength: Long, body: java.io.InputStream?): Boolean {
+        if (Utils.neoSettings?.getBoolean(Utils.KEY_AUTO_DOWNLOAD, false) != true) return false
+        requestDownloadPermissions()
+        DownloadController.init(activity)
+        DownloadController.autoDownload(activity, url, null, contentLength, body)
+        val message = "已自动开始下载"
+        val snackbar = Snackbar.make(_view, message, Snackbar.LENGTH_LONG)
+        if (useSnackbarAnchor) snackbar.setAnchorView(layoutBottomBar)
+        snackbar.setAction("查看") {
+            Utils.openDownloadManagerActivity(activity)
+        }
+        snackbar.show()
+        return true
+    }
+
+    override fun handleContextMenu(element: GeckoSession.ContentDelegate.ContextElement) {
+        val src = resolveMediaUri(element)
+        val isImage = element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE &&
+            src != null && (
+                src.startsWith("http://", true) ||
+                    src.startsWith("https://", true) ||
+                    src.startsWith("data:", true)
+                )
+        if (!isImage) {
+            super.handleContextMenu(element)
+            return
+        }
+        val popup = MenuPopup(activity)
+        popup.addMenuItem(
+            MenuItem("在新标签页中打开图片") {
+                webViewWrapper.createTab().loadUrl(src)
+                webViewWrapper.switchToTab(webViewWrapper.getTabCount() - 1)
+            }.setIcon(R.drawable.open_in_new_24px)
+        )
+        popup.addMenuItem(
+            MenuItem("下载图片") {
+                if (src.startsWith("data:", true)) {
+                    downloadDataImage(src)
+                } else {
+                    webViewWrapper.downloadUrl(src)
+                }
+            }.setIcon(R.drawable.download_24px)
+        )
+        if (element.linkUri != null) {
+            popup.addDivider()
+            addLinkMenuItems(popup, element.linkUri.toString())
+        }
+        popup.build()
+            .setAnimation(Popup.ANIM_FADE)
+            .showAt(webViewWrapper.lastPointerX, webViewWrapper.lastPointerY)
+    }
+
+    private fun resolveMediaUri(element: GeckoSession.ContentDelegate.ContextElement): String? {
+        val src = element.srcUri ?: return null
+        if (src.contains("://") || src.startsWith("data:", true) || src.startsWith("blob:", true)) return src
+        val base = element.baseUri ?: return src
+        return try {
+            java.net.URL(java.net.URL(base), src).toString()
+        } catch (e: Exception) {
+            src
+        }
+    }
+
+    private fun downloadDataImage(dataUri: String) {
+        val bytes = decodeDataImage(dataUri) ?: run {
+            Toast.makeText(activity, "无法解析该图片", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ext = dataUri.substringBefore(';').substringAfter(':', "")
+            .substringAfter('/', "").lowercase()
+            .takeIf { Regex("[a-z0-9]+").matches(it) } ?: "png"
+        showDownloadConfirm(
+            dataUri,
+            "image_${System.currentTimeMillis()}.$ext",
+            bytes.size.toLong(),
+            java.io.ByteArrayInputStream(bytes)
+        )
+    }
+
+    private fun decodeDataImage(dataUri: String): ByteArray? {
+        if (!dataUri.startsWith("data:", true)) return null
+        val comma = dataUri.indexOf(',')
+        if (comma < 0) return null
+        val meta = dataUri.substring(5, comma)
+        val payload = dataUri.substring(comma + 1)
+        return try {
+            if (meta.contains("base64", true)) {
+                android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+            } else {
+                java.net.URLDecoder.decode(payload, "UTF-8").toByteArray(Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    protected open fun showDownloadConfirm(url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) {
+        if (maybeAutoDownload(url, contentLength, body)) return
         requestDownloadPermissions()
         DownloadController.init(activity)
 
@@ -601,22 +904,27 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         }
 
         val client = OkHttpClient()
-        client.newBuilder().build().newCall(
-            Request.Builder().url(url).head().build()
-        ).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {}
-            override fun onResponse(call: Call, response: Response) {
-                response.use {
-                    val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
-                    Handler(Looper.getMainLooper()).post {
-                        if (length > 0) {
-                            sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+        // 已有原始响应流时不发 HEAD 请求：那是对下载地址的额外请求，
+        // 可能消耗掉一次性链接。
+        if (body == null) {
+            client.newBuilder().build().newCall(
+                Request.Builder().url(url).head().build()
+            ).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {}
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
+                        Handler(Looper.getMainLooper()).post {
+                            if (length > 0) {
+                                sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+                            }
                         }
                     }
                 }
-            }
-        })
+            })
+        }
 
+        var consumedBody = false
         var dialog: AlertDialog? = null
         val dismiss = { dialog?.dismiss() }
         dialog = MaterialAlertDialogBuilder(activity)
@@ -645,7 +953,8 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                     paused = false,
                     timestamp = 0L
                 )
-                DownloadController.start(activity, record)
+                consumedBody = true
+                DownloadController.start(activity, record, body)
                 val snackbar = Snackbar.make(_view, "已开始下载", Snackbar.LENGTH_LONG)
                 if (useSnackbarAnchor) snackbar.setAnchorView(layoutBottomBar)
                 snackbar.setAction("查看") {
@@ -653,6 +962,12 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 }
                 snackbar.show()
                 dismiss()
+            }
+        }
+        dialog.setOnDismissListener {
+            // 未交给下载器的响应流直接关闭，释放连接
+            if (!consumedBody) {
+                runCatching { body?.close() }
             }
         }
         dialog.show()

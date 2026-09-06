@@ -57,6 +57,7 @@ class EvoWebViewWrapper(
                 if (runtimeInstance != null) return runtimeInstance!!
                 val settings = GeckoRuntimeSettings.Builder()
                     .preferredColorScheme(Utils.getPreferredColorScheme())
+                    .remoteDebuggingEnabled(true)
                     .build()
                 val runtime = GeckoRuntime.create(activity, settings)
                 val defaultUa = GeckoSession.getDefaultUserAgent()
@@ -123,8 +124,9 @@ class EvoWebViewWrapper(
     var onLoadingChanged: ((Boolean) -> Unit)? = null
     var onExternalSchemeRequested: ((String) -> Unit)? = null
     var onNavigateRequested: ((String) -> Unit)? = null
-    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long) -> Unit)? = null
+    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
+    var onFullScreen: ((fullScreen: Boolean) -> Unit)? = null
 
     init {
         geckoView.apply {
@@ -167,19 +169,18 @@ class EvoWebViewWrapper(
         tab.onContextMenu = { screenX, screenY, element ->
             if (tab === activeTab) onContextMenu?.invoke(screenX, screenY, element)
         }
-        tab.onNavigationStateChanged = { if (tab === activeTab) onNavigationStateChanged?.invoke() }
-        tab.onNavigationRequested = { session, uri ->
-            geckoView.setSession(session)
-            session.loadUri(uri)
+        tab.onFullScreen = { fullScreen ->
+            if (tab === activeTab) onFullScreen?.invoke(fullScreen)
         }
+        tab.onNavigationStateChanged = { if (tab === activeTab) onNavigationStateChanged?.invoke() }
         tab.onPageStarted = { url -> if (tab === activeTab) onPageStarted?.invoke(url) }
         tab.onPageStopped = { success -> if (tab === activeTab) onPageStopped?.invoke(success) }
         tab.onProgressChanged = { progress -> if (tab === activeTab) onProgressChanged?.invoke(progress) }
         tab.onLoadingChanged = { loading -> if (tab === activeTab) onLoadingChanged?.invoke(loading) }
         tab.onExternalSchemeRequested = { uri -> if (tab === activeTab) onExternalSchemeRequested?.invoke(uri) }
         tab.onNavigateRequested = { value -> if (tab === activeTab) onNavigateRequested?.invoke(value) }
-        tab.onDownloadRequested = { url, filename, length ->
-            if (tab === activeTab) onDownloadRequested?.invoke(url, filename, length)
+        tab.onDownloadRequested = { url, filename, length, body ->
+            if (tab === activeTab) onDownloadRequested?.invoke(url, filename, length, body)
         }
         formalTabs.add(insertIndex.coerceIn(0, formalTabs.size), tab)
         activeTabIndex = formalTabs.indexOf(tab)
@@ -288,6 +289,10 @@ class EvoWebViewWrapper(
 
     fun stopLoading() {
         activeTab?.stopLoading()
+    }
+
+    fun downloadUrl(url: String) {
+        onDownloadRequested?.invoke(url, null, -1L, null)
     }
 
     fun capturePixels(): GeckoResult<Bitmap>? = geckoView.capturePixels()

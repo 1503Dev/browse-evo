@@ -23,6 +23,7 @@ import dev1503.browseevo.ui.widgets.EvoWebViewWrapper
 import dev1503.materialpopups.widgets.menuitem.MenuItem
 import dev1503.materialpopups.widgets.popup.MenuPopup
 import dev1503.materialpopups.widgets.popup.Popup
+import org.mozilla.geckoview.GeckoSession
 import java.net.URLEncoder
 
 open class BrowserMainViewModel(override val activity: MainActivity): ViewModel(activity) {
@@ -68,22 +69,7 @@ open class BrowserMainViewModel(override val activity: MainActivity): ViewModel(
         webViewWrapper.onProgressChanged = { progress -> animateProgress(progress) }
         webViewWrapper.onLoadingChanged = { loading -> onLoadingStateChanged(loading) }
         webViewWrapper.onContextMenu = { _, _, element ->
-            if (element.linkUri != null) {
-                val linkUrl: String = element.linkUri.toString()
-                MenuPopup(activity).addMenuItem(MenuItem("在新标签页中打开链接", { v->
-                    webViewWrapper.createTab().loadUrl(linkUrl)
-                    webViewWrapper.switchToTab(webViewWrapper.getTabCount() - 1)
-                }).setIcon(R.drawable.open_in_new_24px))
-                    .addDivider()
-                    .addMenuItem(MenuItem("复制链接地址", { v->
-                    val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("url", linkUrl))
-                    Toast.makeText(activity, "已复制链接", Toast.LENGTH_SHORT).show()
-                }))
-                    .build()
-                    .setAnimation(Popup.ANIM_FADE)
-                    .showAt(webViewWrapper.lastPointerX, webViewWrapper.lastPointerY)
-            }
+            handleContextMenu(element)
         }
 
         webViewWrapper.loadBuiltInPage()
@@ -183,5 +169,30 @@ open class BrowserMainViewModel(override val activity: MainActivity): ViewModel(
     protected fun searchWithBing(input: String) {
         val query = URLEncoder.encode(input, "UTF-8")
         webViewWrapper.goToUrl("https://www.bing.com/search?q=$query")
+    }
+
+    protected open fun handleContextMenu(element: GeckoSession.ContentDelegate.ContextElement) {
+        if (element.linkUri == null) return
+        val popup = MenuPopup(activity)
+        addLinkMenuItems(popup, element.linkUri.toString())
+        popup.build()
+            .setAnimation(Popup.ANIM_FADE)
+            .showAt(webViewWrapper.lastPointerX, webViewWrapper.lastPointerY)
+    }
+
+    protected fun addLinkMenuItems(popup: MenuPopup, linkUrl: String) {
+        popup.addMenuItem(
+            MenuItem("在新标签页中打开链接") {
+                webViewWrapper.createTab().loadUrl(linkUrl)
+                webViewWrapper.switchToTab(webViewWrapper.getTabCount() - 1)
+            }.setIcon(R.drawable.open_in_new_24px)
+        )
+        popup.addMenuItem(
+            MenuItem("复制链接地址") {
+                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("url", linkUrl))
+                Toast.makeText(activity, "已复制链接", Toast.LENGTH_SHORT).show()
+            }
+        )
     }
 }
