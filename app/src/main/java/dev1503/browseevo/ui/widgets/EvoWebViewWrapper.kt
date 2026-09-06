@@ -57,6 +57,7 @@ class EvoWebViewWrapper(
                 if (runtimeInstance != null) return runtimeInstance!!
                 val settings = GeckoRuntimeSettings.Builder()
                     .preferredColorScheme(Utils.getPreferredColorScheme())
+                    .remoteDebuggingEnabled(true)
                     .build()
                 val runtime = GeckoRuntime.create(activity, settings)
                 val defaultUa = GeckoSession.getDefaultUserAgent()
@@ -284,6 +285,10 @@ class EvoWebViewWrapper(
 
     fun stopLoading() {
         activeTab?.stopLoading()
+    }
+
+    fun downloadUrl(url: String) {
+        onDownloadRequested?.invoke(url, null, -1L, null)
     }
 
     fun capturePixels(): GeckoResult<Bitmap>? = geckoView.capturePixels()

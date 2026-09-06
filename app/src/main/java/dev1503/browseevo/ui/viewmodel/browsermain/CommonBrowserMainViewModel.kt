@@ -52,6 +52,10 @@ import dev1503.browseevo.download.DownloadRecord
 import dev1503.browseevo.ui.widgets.BottomSheetDialogBuilder
 import dev1503.browseevo.ui.widgets.EvoPopupMenu
 import dev1503.browseevo.ui.widgets.MenuBottomSheet
+import dev1503.materialpopups.widgets.menuitem.MenuItem
+import dev1503.materialpopups.widgets.popup.MenuPopup
+import dev1503.materialpopups.widgets.popup.Popup
+import org.mozilla.geckoview.GeckoSession
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
@@ -606,6 +610,87 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         }
         snackbar.show()
         return true
+    }
+
+    override fun handleContextMenu(element: GeckoSession.ContentDelegate.ContextElement) {
+        val src = resolveMediaUri(element)
+        val isImage = element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE &&
+            src != null && (
+                src.startsWith("http://", true) ||
+                    src.startsWith("https://", true) ||
+                    src.startsWith("data:", true)
+                )
+        if (!isImage) {
+            super.handleContextMenu(element)
+            return
+        }
+        val popup = MenuPopup(activity)
+        popup.addMenuItem(
+            MenuItem("在新标签页中打开图片") {
+                webViewWrapper.createTab().loadUrl(src)
+                webViewWrapper.switchToTab(webViewWrapper.getTabCount() - 1)
+            }.setIcon(R.drawable.open_in_new_24px)
+        )
+        popup.addMenuItem(
+            MenuItem("下载图片") {
+                if (src.startsWith("data:", true)) {
+                    downloadDataImage(src)
+                } else {
+                    webViewWrapper.downloadUrl(src)
+                }
+            }.setIcon(R.drawable.download_24px)
+        )
+        if (element.linkUri != null) {
+            popup.addDivider()
+            addLinkMenuItems(popup, element.linkUri.toString())
+        }
+        popup.build()
+            .setAnimation(Popup.ANIM_FADE)
+            .showAt(webViewWrapper.lastPointerX, webViewWrapper.lastPointerY)
+    }
+
+    private fun resolveMediaUri(element: GeckoSession.ContentDelegate.ContextElement): String? {
+        val src = element.srcUri ?: return null
+        if (src.contains("://") || src.startsWith("data:", true) || src.startsWith("blob:", true)) return src
+        val base = element.baseUri ?: return src
+        return try {
+            java.net.URL(java.net.URL(base), src).toString()
+        } catch (e: Exception) {
+            src
+        }
+    }
+
+    private fun downloadDataImage(dataUri: String) {
+        val bytes = decodeDataImage(dataUri) ?: run {
+            Toast.makeText(activity, "无法解析该图片", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ext = dataUri.substringBefore(';').substringAfter(':', "")
+            .substringAfter('/', "").lowercase()
+            .takeIf { Regex("[a-z0-9]+").matches(it) } ?: "png"
+        showDownloadConfirm(
+            dataUri,
+            "image_${System.currentTimeMillis()}.$ext",
+            bytes.size.toLong(),
+            java.io.ByteArrayInputStream(bytes)
+        )
+    }
+
+    private fun decodeDataImage(dataUri: String): ByteArray? {
+        if (!dataUri.startsWith("data:", true)) return null
+        val comma = dataUri.indexOf(',')
+        if (comma < 0) return null
+        val meta = dataUri.substring(5, comma)
+        val payload = dataUri.substring(comma + 1)
+        return try {
+            if (meta.contains("base64", true)) {
+                android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+            } else {
+                java.net.URLDecoder.decode(payload, "UTF-8").toByteArray(Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     protected open fun showDownloadConfirm(url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) {
