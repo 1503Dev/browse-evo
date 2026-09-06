@@ -41,6 +41,14 @@ class EvoDataStore(val context: Activity): PreferenceDataStore() {
         Utils.neoSettings?.putInt(key!!, value)
     }
 
+    override fun getBoolean(key: String?, defValue: Boolean): Boolean {
+        return Utils.neoSettings?.getBoolean(key!!, defValue) ?: defValue
+    }
+
+    override fun putBoolean(key: String?, value: Boolean) {
+        Utils.neoSettings?.putBoolean(key!!, value)
+    }
+
     fun requestRestart() {
         val snackbar = Snackbar.make(context.window.decorView, "重启以应用更改", Snackbar.LENGTH_SHORT)
         snackbar.show()

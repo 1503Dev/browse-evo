@@ -5,6 +5,10 @@
         android:title="外观"
         android:icon="@drawable/imagesearch_roller_24px"/>
     <Preference
+        android:key="download"
+        android:title="下载"
+        android:icon="@drawable/download_24px"/>
+    <Preference
         android:key="about"
         android:title="关于"
         android:icon="@drawable/info_24px"/>

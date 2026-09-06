@@ -19,6 +19,7 @@ object Utils {
 
     const val KEY_DARK_MODE = "appearance/dark_mode"
     const val KEY_PC_MODE = "browse/pc_mode"
+    const val KEY_AUTO_DOWNLOAD = "download/auto_download"
 
     const val DARK_MODE_OFF = 0
     const val DARK_MODE_ON = 1

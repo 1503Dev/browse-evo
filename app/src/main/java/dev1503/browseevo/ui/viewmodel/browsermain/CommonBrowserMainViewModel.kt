@@ -96,8 +96,8 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
 
         super.onCreate(savedInstanceState)
 
-        webViewWrapper.onDownloadRequested = { url, filename, length ->
-            showDownloadConfirm(url, filename, length)
+        webViewWrapper.onDownloadRequested = { url, filename, length, body ->
+            showDownloadConfirm(url, filename, length, body)
         }
 
         btnTabs.setOnClickListener { showTabsSheet() }
@@ -588,7 +588,28 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         }
     }
 
-    protected open fun showDownloadConfirm(url: String, filename: String?, contentLength: Long) {
+    /**
+     * 开启"自动开始下载"时跳过确认对话框直接处理下载请求；
+     * 返回 false 表示未启用，调用方继续走询问流程。
+     * [body] 为触发下载时的原始响应流，直接落盘以复用该连接。
+     */
+    protected fun maybeAutoDownload(url: String, contentLength: Long, body: java.io.InputStream?): Boolean {
+        if (Utils.neoSettings?.getBoolean(Utils.KEY_AUTO_DOWNLOAD, false) != true) return false
+        requestDownloadPermissions()
+        DownloadController.init(activity)
+        DownloadController.autoDownload(activity, url, null, contentLength, body)
+        val message = "已自动开始下载"
+        val snackbar = Snackbar.make(_view, message, Snackbar.LENGTH_LONG)
+        if (useSnackbarAnchor) snackbar.setAnchorView(layoutBottomBar)
+        snackbar.setAction("查看") {
+            Utils.openDownloadManagerActivity(activity)
+        }
+        snackbar.show()
+        return true
+    }
+
+    protected open fun showDownloadConfirm(url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) {
+        if (maybeAutoDownload(url, contentLength, body)) return
         requestDownloadPermissions()
         DownloadController.init(activity)
 
@@ -601,22 +622,27 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         }
 
         val client = OkHttpClient()
-        client.newBuilder().build().newCall(
-            Request.Builder().url(url).head().build()
-        ).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {}
-            override fun onResponse(call: Call, response: Response) {
-                response.use {
-                    val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
-                    Handler(Looper.getMainLooper()).post {
-                        if (length > 0) {
-                            sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+        // 已有原始响应流时不发 HEAD 请求：那是对下载地址的额外请求，
+        // 可能消耗掉一次性链接。
+        if (body == null) {
+            client.newBuilder().build().newCall(
+                Request.Builder().url(url).head().build()
+            ).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {}
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        val length = it.header("Content-Length")?.toLongOrNull() ?: -1L
+                        Handler(Looper.getMainLooper()).post {
+                            if (length > 0) {
+                                sizeText.text = "文件大小: ${DownloadNotifier.formatBytes(length)}"
+                            }
                         }
                     }
                 }
-            }
-        })
+            })
+        }
 
+        var consumedBody = false
         var dialog: AlertDialog? = null
         val dismiss = { dialog?.dismiss() }
         dialog = MaterialAlertDialogBuilder(activity)
@@ -645,7 +671,8 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                     paused = false,
                     timestamp = 0L
                 )
-                DownloadController.start(activity, record)
+                consumedBody = true
+                DownloadController.start(activity, record, body)
                 val snackbar = Snackbar.make(_view, "已开始下载", Snackbar.LENGTH_LONG)
                 if (useSnackbarAnchor) snackbar.setAnchorView(layoutBottomBar)
                 snackbar.setAction("查看") {
@@ -653,6 +680,12 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 }
                 snackbar.show()
                 dismiss()
+            }
+        }
+        dialog.setOnDismissListener {
+            // 未交给下载器的响应流直接关闭，释放连接
+            if (!consumedBody) {
+                runCatching { body?.close() }
             }
         }
         dialog.show()

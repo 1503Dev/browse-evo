@@ -123,7 +123,7 @@ class EvoWebViewWrapper(
     var onLoadingChanged: ((Boolean) -> Unit)? = null
     var onExternalSchemeRequested: ((String) -> Unit)? = null
     var onNavigateRequested: ((String) -> Unit)? = null
-    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long) -> Unit)? = null
+    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
 
     init {
@@ -178,8 +178,8 @@ class EvoWebViewWrapper(
         tab.onLoadingChanged = { loading -> if (tab === activeTab) onLoadingChanged?.invoke(loading) }
         tab.onExternalSchemeRequested = { uri -> if (tab === activeTab) onExternalSchemeRequested?.invoke(uri) }
         tab.onNavigateRequested = { value -> if (tab === activeTab) onNavigateRequested?.invoke(value) }
-        tab.onDownloadRequested = { url, filename, length ->
-            if (tab === activeTab) onDownloadRequested?.invoke(url, filename, length)
+        tab.onDownloadRequested = { url, filename, length, body ->
+            if (tab === activeTab) onDownloadRequested?.invoke(url, filename, length, body)
         }
         formalTabs.add(insertIndex.coerceIn(0, formalTabs.size), tab)
         activeTabIndex = formalTabs.indexOf(tab)

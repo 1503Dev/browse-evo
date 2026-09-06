@@ -71,7 +71,7 @@ class EvoWebViewTab(
     var onLoadingChanged: ((Boolean) -> Unit)? = null
     var onExternalSchemeRequested: ((String) -> Unit)? = null
     var onNavigateRequested: ((String) -> Unit)? = null
-    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long) -> Unit)? = null
+    var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
 
     val currentUrl: String
@@ -201,7 +201,7 @@ class EvoWebViewTab(
                     }
                     if (isDownloadUrl(request.uri)) {
                         Log.w(TAG, "download intercepted by extension: ${request.uri}")
-                        onDownloadRequested?.invoke(request.uri, null, -1L)
+                        onDownloadRequested?.invoke(request.uri, null, -1L, null)
                         return GeckoResult.fromValue(AllowOrDeny.DENY)
                     }
                     Log.w(TAG, "target current")
@@ -315,7 +315,9 @@ class EvoWebViewTab(
                     Regex("""filename\*?=(?:UTF-8''|")?([^";]+)""", RegexOption.IGNORE_CASE)
                         .find(header)?.groupValues?.get(1)
                 }?.let { Utils.decodeUrlEncoded(it) }
-                onDownloadRequested?.invoke(response.uri, filename, contentLength)
+                // body 是触发下载时的原始响应流：交给下载器直接落盘，
+                // 避免对（可能一次性的）下载地址发起第二次请求。
+                onDownloadRequested?.invoke(response.uri, filename, contentLength, response.body)
             }
 
             override fun onContextMenu(session: GeckoSession, screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) {
