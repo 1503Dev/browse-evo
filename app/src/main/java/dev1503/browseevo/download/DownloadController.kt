@@ -324,6 +324,16 @@ object DownloadController {
                     DownloadNotifier.notifyCompleted(appContext, finishedRecord)
                     dispatchProgress(finishedRecord)
                 }
+            } catch (e: java.net.SocketTimeoutException) {
+                android.util.Log.w(TAG, "stream download timed out", e)
+                val failedRecord = record.copy(
+                    savedBytes = saved,
+                    paused = true,
+                    error = "下载超时"
+                )
+                manager.update(failedRecord)
+                DownloadNotifier.notifyPaused(appContext, failedRecord)
+                dispatchProgress(failedRecord)
             } catch (e: Exception) {
                 android.util.Log.w(TAG, "stream download failed", e)
                 val failedRecord = record.copy(

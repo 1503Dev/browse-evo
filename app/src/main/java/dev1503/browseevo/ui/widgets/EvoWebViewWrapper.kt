@@ -168,10 +168,6 @@ class EvoWebViewWrapper(
             if (tab === activeTab) onContextMenu?.invoke(screenX, screenY, element)
         }
         tab.onNavigationStateChanged = { if (tab === activeTab) onNavigationStateChanged?.invoke() }
-        tab.onNavigationRequested = { session, uri ->
-            geckoView.setSession(session)
-            session.loadUri(uri)
-        }
         tab.onPageStarted = { url -> if (tab === activeTab) onPageStarted?.invoke(url) }
         tab.onPageStopped = { success -> if (tab === activeTab) onPageStopped?.invoke(success) }
         tab.onProgressChanged = { progress -> if (tab === activeTab) onProgressChanged?.invoke(progress) }

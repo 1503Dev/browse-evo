@@ -64,7 +64,6 @@ class EvoWebViewTab(
     var onNewTabRequested: ((GeckoSession) -> Unit)? = null
     var onTitleChanged: ((String?) -> Unit)? = null
     var onNavigationStateChanged: (() -> Unit)? = null
-    var onNavigationRequested: ((GeckoSession, String) -> Unit)? = null
     var onPageStarted: ((String?) -> Unit)? = null
     var onPageStopped: ((Boolean) -> Unit)? = null
     var onProgressChanged: ((Int) -> Unit)? = null
@@ -204,19 +203,7 @@ class EvoWebViewTab(
                         onDownloadRequested?.invoke(request.uri, null, -1L, null)
                         return GeckoResult.fromValue(AllowOrDeny.DENY)
                     }
-                    Log.w(TAG, "target current")
-                    session.stop()
-                    val newSession = createSession()
-                    pendingSessions.add(newSession)
-                    loadingSessions.add(newSession)
-                    sessionStack.add(newSession)
-                    forwardStack.clear()
-                    setPendingTarget(newSession, translateToEvo(request.uri))
-                    onNavigationStateChanged?.invoke()
-                    onTitleChanged?.invoke(currentTitle)
-                    notifyLoadingChanged()
-                    onNavigationRequested?.invoke(newSession, request.uri)
-                    return GeckoResult.fromValue(AllowOrDeny.DENY)
+                    return GeckoResult.fromValue(AllowOrDeny.ALLOW)
                 }
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
@@ -309,6 +296,7 @@ class EvoWebViewTab(
 
             override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
                 Log.w(TAG, "onExternalResponse: ${response.uri} headers=${response.headers}")
+                response.setReadTimeoutMillis(20_000)
                 val contentLength = response.headers["Content-Length"]?.toLongOrNull() ?: -1L
                 val disposition = response.headers["Content-Disposition"]
                 val filename = disposition?.let { header ->
