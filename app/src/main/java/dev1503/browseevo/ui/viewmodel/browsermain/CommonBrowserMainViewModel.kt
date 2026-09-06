@@ -275,6 +275,11 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     }
 
     private fun promptExternalScheme(input: String) {
+        val lower = input.lowercase()
+        if (lower.startsWith("intent:") || lower.startsWith("android-app:")) {
+            launchIntentUri(input)
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(input))
         if (intent.resolveActivity(activity.packageManager) != null) {
             val builder = Snackbar.make(_view, "是否交给外部应用打开？", Snackbar.LENGTH_LONG)
@@ -287,6 +292,51 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 }
             }
             builder.show()
+        } else {
+            val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
+            if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+            builder.show()
+        }
+    }
+
+    private fun launchIntentUri(intentUri: String) {
+        val intent = org.mozilla.gecko.util.IntentUtils.getSafeIntent(Uri.parse(intentUri))
+        val fallback = intent?.getStringExtra("browser_fallback_url")
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+        if (intent == null || intent.`package` == activity.packageName) {
+            if (fallback != null) {
+                webViewWrapper.goToUrl(fallback)
+            } else {
+                val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
+                if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+                builder.show()
+            }
+            return
+        }
+        val resolvable = try {
+            intent.resolveActivity(activity.packageManager) != null
+        } catch (e: Exception) {
+            false
+        }
+        if (resolvable) {
+            val builder = Snackbar.make(_view, "是否打开外部应用？", Snackbar.LENGTH_LONG)
+            if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)
+            builder.setAction("允许") {
+                try {
+                    activity.startActivity(intent)
+                } catch (e: Exception) {
+                    if (fallback != null) {
+                        webViewWrapper.goToUrl(fallback)
+                    } else {
+                        val fail = Snackbar.make(_view, "无法打开外部应用", Snackbar.LENGTH_SHORT)
+                        if (useSnackbarAnchor) fail.setAnchorView(layoutBottomBar)
+                        fail.show()
+                    }
+                }
+            }
+            builder.show()
+        } else if (fallback != null) {
+            webViewWrapper.goToUrl(fallback)
         } else {
             val builder = Snackbar.make(_view, "没有应用可以处理该地址", Snackbar.LENGTH_SHORT)
             if (useSnackbarAnchor) builder.setAnchorView(layoutBottomBar)

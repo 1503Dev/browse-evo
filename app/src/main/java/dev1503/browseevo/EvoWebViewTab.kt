@@ -455,6 +455,12 @@ class EvoWebViewTab(
             override fun onPageStart(session: GeckoSession, url: String) {
                 loadingSessions.add(session)
                 if (session == currentSession) {
+                    if (pendingTraversalCount > 0) {
+                        pendingTraversalCount--
+                    } else {
+                        clearForwardSessions()
+                        onNavigationStateChanged?.invoke()
+                    }
                     onPageStarted?.invoke(url)
                     notifyLoadingChanged()
                 }
@@ -481,16 +487,29 @@ class EvoWebViewTab(
     }
 
     fun pushSession(session: GeckoSession) {
+        clearForwardSessions()
         sessionStack.add(session)
-        forwardStack.clear()
         onNavigationStateChanged?.invoke()
         onTitleChanged?.invoke(currentTitle)
         notifyLoadingChanged()
     }
 
+    private fun clearForwardSessions() {
+        for (session in forwardStack) {
+            pendingSessions.remove(session)
+            loadingSessions.remove(session)
+            pendingTargetUrls.remove(session)
+            session.close()
+        }
+        forwardStack.clear()
+    }
+
+    private var pendingTraversalCount = 0
+
     fun goBack(): GeckoSession? {
         val session = currentSession ?: return null
         if (canGoBackMap[session] == true) {
+            pendingTraversalCount++
             session.goBack()
             return session
         }
@@ -506,6 +525,7 @@ class EvoWebViewTab(
     fun goForward(): GeckoSession? {
         val session = currentSession ?: return null
         if (canGoForwardMap[session] == true) {
+            pendingTraversalCount++
             session.goForward()
             return session
         }
@@ -801,7 +821,7 @@ class EvoWebViewTab(
             pendingTargetUrls.remove(session)
         }
         sessionStack.clear()
-        forwardStack.clear()
+        clearForwardSessions()
         pendingSessions.clear()
         errorSessions.clear()
         canGoBackMap.clear()
