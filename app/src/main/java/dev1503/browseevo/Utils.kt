@@ -172,9 +172,9 @@ object Utils {
 
     fun looksLikeHost(input: String): Boolean {
         if (input.contains("://") || input.any { it.isWhitespace() }) return false
-        return Regex("""^(\d{1,3}\.){3}\d{1,3}(:\d+)?(/.*)?$""").matches(input) ||
-            Regex("""^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+(:\d+)?(/.*)?$""").matches(input) ||
-            Regex("""^localhost(:\d+)?(/.*)?$""", RegexOption.IGNORE_CASE).matches(input)
+        return Regex("""^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#].*)?$""").matches(input) ||
+            Regex("""^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+(:\d+)?([/?#].*)?$""").matches(input) ||
+            Regex("""^localhost(:\d+)?([/?#].*)?$""", RegexOption.IGNORE_CASE).matches(input)
     }
 
     fun schemeOf(input: String): String? {

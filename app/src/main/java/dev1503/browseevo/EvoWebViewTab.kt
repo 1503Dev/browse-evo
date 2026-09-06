@@ -6,6 +6,10 @@ import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.FrameLayout
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev1503.browseevo.data.HistoryManager
 import dev1503.browseevo.evo.EvoUri
 import dev1503.browseevo.ui.widgets.EvoWebViewWrapper
@@ -328,7 +332,122 @@ class EvoWebViewTab(
                 }
                 return result
             }
+
+            override fun onAlertPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.AlertPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) {
+                    setMessage(prompt.message ?: "")
+                    setPositiveButton(android.R.string.ok, null)
+                }
+                return result
+            }
+
+            override fun onButtonPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.ButtonPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) { settle ->
+                    setMessage(prompt.message ?: "")
+                    setPositiveButton(android.R.string.ok) { _, _ ->
+                        settle { prompt.confirm(GeckoSession.PromptDelegate.ButtonPrompt.Type.POSITIVE) }
+                    }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onTextPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.TextPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result) { settle ->
+                    prompt.message?.takeIf { it.isNotBlank() }?.let { setMessage(it) }
+                    val pad = (16 * context.resources.displayMetrics.density).toInt()
+                    val container = FrameLayout(context).apply {
+                        setPadding(pad, pad / 2, pad, 0)
+                    }
+                    val input = EditText(context).apply {
+                        setText(prompt.defaultValue ?: "")
+                    }
+                    container.addView(
+                        input,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    setView(container)
+                    setPositiveButton(android.R.string.ok) { _, _ ->
+                        settle { prompt.confirm(input.text?.toString() ?: "") }
+                    }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onRepostConfirmPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.RepostConfirmPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result, dismissAction = { prompt.confirm(AllowOrDeny.DENY) }) { settle ->
+                    setMessage("要重新提交表单数据吗？")
+                    setPositiveButton("重新提交") { _, _ -> settle { prompt.confirm(AllowOrDeny.ALLOW) } }
+                    setNegativeButton(android.R.string.cancel, null)
+                }
+                return result
+            }
+
+            override fun onBeforeUnloadPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.BeforeUnloadPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                showJsDialog(prompt, result, dismissAction = { prompt.confirm(AllowOrDeny.DENY) }) { settle ->
+                    setMessage("离开此页面吗？已输入的内容可能不会被保存。")
+                    setPositiveButton("离开") { _, _ -> settle { prompt.confirm(AllowOrDeny.ALLOW) } }
+                    setNegativeButton("留在此页", null)
+                }
+                return result
+            }
         }
+    }
+
+    private fun dialogTitle(prompt: GeckoSession.PromptDelegate.BasePrompt): String {
+        return prompt.title?.takeIf { it.isNotBlank() }
+            ?: currentTitle.ifBlank { "提示" }
+    }
+
+    private fun showJsDialog(
+        prompt: GeckoSession.PromptDelegate.BasePrompt,
+        result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+        dismissAction: () -> GeckoSession.PromptDelegate.PromptResponse = { prompt.dismiss() },
+        configure: MaterialAlertDialogBuilder.(onAction: (() -> GeckoSession.PromptDelegate.PromptResponse) -> Unit) -> Unit
+    ) {
+        var handled = false
+        val settle: (() -> GeckoSession.PromptDelegate.PromptResponse) -> Unit = { action ->
+            if (!handled) {
+                handled = true
+                try {
+                    result.complete(action())
+                } catch (e: Exception) {
+                    Log.w(TAG, "js dialog failed", e)
+                    runCatching { result.complete(prompt.dismiss()) }
+                }
+            }
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(dialogTitle(prompt))
+            .setOnDismissListener { settle(dismissAction) }
+            .apply { configure(settle) }
+            .create()
+        dialog.setCanceledOnTouchOutside(false)
+        dialog.show()
     }
 
     private fun createProgressDelegate(): GeckoSession.ProgressDelegate {
