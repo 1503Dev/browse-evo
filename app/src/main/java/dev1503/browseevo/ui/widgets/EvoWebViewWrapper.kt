@@ -126,6 +126,7 @@ class EvoWebViewWrapper(
     var onNavigateRequested: ((String) -> Unit)? = null
     var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
+    var onFullScreen: ((fullScreen: Boolean) -> Unit)? = null
 
     init {
         geckoView.apply {
@@ -167,6 +168,9 @@ class EvoWebViewWrapper(
         tab.onTitleChanged = { title -> if (tab === activeTab) onTitleChanged?.invoke(title) }
         tab.onContextMenu = { screenX, screenY, element ->
             if (tab === activeTab) onContextMenu?.invoke(screenX, screenY, element)
+        }
+        tab.onFullScreen = { fullScreen ->
+            if (tab === activeTab) onFullScreen?.invoke(fullScreen)
         }
         tab.onNavigationStateChanged = { if (tab === activeTab) onNavigationStateChanged?.invoke() }
         tab.onPageStarted = { url -> if (tab === activeTab) onPageStarted?.invoke(url) }

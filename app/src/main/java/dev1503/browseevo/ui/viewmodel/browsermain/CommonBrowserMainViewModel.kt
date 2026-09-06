@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -16,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.LayoutInflater
@@ -29,11 +31,16 @@ import android.widget.LinearLayout
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.widget.EditText
+import android.widget.ArrayAdapter
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -61,7 +68,9 @@ import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
 import java.io.IOException
+import java.net.URLEncoder
 
 abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainViewModel(activity) {
     protected abstract val layoutResId: Int
@@ -97,6 +106,7 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         layoutBottomBar = _view.findViewById(R.id.layoutBottomBar)
         urlEditBar = _view.findViewById(R.id.layoutUrlEditOverlay)
         textTabCount = _view.findViewById(R.id.textTabCount)
+        suggestionList = _view.findViewById(R.id.suggestionList)
 
         super.onCreate(savedInstanceState)
 
@@ -114,6 +124,7 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
         webViewWrapper.onExternalSchemeRequested = { uri -> promptExternalScheme(uri) }
         webViewWrapper.onNavigateRequested = { value -> navigate(value) }
         webViewWrapper.onTabCreated = { bounceTabsButton() }
+        webViewWrapper.onFullScreen = { fullScreen -> handlePageFullScreen(fullScreen) }
 
         urlEditOverlay.visibility = View.GONE
         applyDefaultColor()
@@ -143,6 +154,7 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
                 if (!programmaticSet) {
                     userEditedUrl = true
                 }
+                scheduleSearchSuggestions(s?.toString().orEmpty())
             }
         })
         editTextUrl.setOnEditorActionListener { _, actionId, _ ->
@@ -195,6 +207,10 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     }
 
     override fun handleBackPressed(): Boolean {
+        if (isPageFullScreen) {
+            webViewWrapper.activeTab?.currentSession?.exitFullScreen()
+            return true
+        }
         if (dismissTopOverlay()) return true
         if (closeUrlEditOverlayOnBack &&
             ::urlEditOverlay.isInitialized &&
@@ -368,6 +384,9 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     private fun hideUrlEditOverlay() {
         if (urlEditOverlay.visibility != View.VISIBLE) return
         editTextUrl.clearFocus()
+        suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+        pendingSuggestQuery = null
+        hideSearchSuggestions()
         val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(editTextUrl.windowToken, 0)
         urlEditOverlay.animate()
@@ -375,6 +394,107 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
             .setDuration(200L)
             .withEndAction { urlEditOverlay.visibility = View.GONE }
             .start()
+    }
+
+    private companion object {
+        const val SUGGEST_DEBOUNCE_MS = 300L
+        const val SUGGEST_MIN_INTERVAL_MS = 1000L
+        const val SUGGEST_MAX_COUNT = 5
+    }
+
+    private var suggestionList: ListView? = null
+    private var pendingSuggestQuery: String? = null
+    private var lastSuggestQuery: String? = null
+    private var lastSuggestFetchAt = 0L
+    private val suggestionHandler = Handler(Looper.getMainLooper())
+    private val suggestionFetchRunnable = Runnable {
+        pendingSuggestQuery?.let { fetchSearchSuggestions(it) }
+    }
+    private val suggestionClient by lazy { OkHttpClient() }
+
+    private fun scheduleSearchSuggestions(query: String) {
+        val container = suggestionList ?: return
+        suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+        if (query.isBlank() || schemeOf(query) != null) {
+            pendingSuggestQuery = null
+            hideSearchSuggestions()
+            return
+        }
+        pendingSuggestQuery = query
+        suggestionHandler.postDelayed(suggestionFetchRunnable, SUGGEST_DEBOUNCE_MS)
+    }
+
+    private fun fetchSearchSuggestions(query: String) {
+        if (query != editTextUrl.text?.toString()) return
+        if (query == lastSuggestQuery) return
+        val elapsed = System.currentTimeMillis() - lastSuggestFetchAt
+        if (elapsed < SUGGEST_MIN_INTERVAL_MS) {
+            pendingSuggestQuery = query
+            suggestionHandler.removeCallbacks(suggestionFetchRunnable)
+            suggestionHandler.postDelayed(suggestionFetchRunnable, SUGGEST_MIN_INTERVAL_MS - elapsed)
+            return
+        }
+        lastSuggestFetchAt = System.currentTimeMillis()
+        lastSuggestQuery = query
+        suggestionClient.newCall(
+            Request.Builder()
+                .url("https://api.bing.com/osjson.aspx?query=" + URLEncoder.encode(query, "UTF-8"))
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+        ).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    val body = runCatching { it.body?.string() }.getOrNull() ?: return
+                    val items = parseSearchSuggestions(body)
+                    Handler(Looper.getMainLooper()).post {
+                        if (editTextUrl.text?.toString() != query) return@post
+                        showSearchSuggestions(items)
+                    }
+                }
+            }
+        })
+    }
+
+    private fun parseSearchSuggestions(body: String): List<String> {
+        return runCatching {
+            val suggestions = JSONArray(body).optJSONArray(1) ?: return emptyList()
+            (0 until suggestions.length())
+                .map { suggestions.optString(it) }
+                .filter { it.isNotBlank() }
+                .take(SUGGEST_MAX_COUNT)
+        }.getOrDefault(emptyList())
+    }
+
+    private fun showSearchSuggestions(items: List<String>) {
+        val container = suggestionList ?: return
+        if (items.isEmpty()) {
+            container.visibility = View.GONE
+            container.adapter = null
+            return
+        }
+        container.adapter = object : ArrayAdapter<String>(
+            activity,
+            android.R.layout.simple_list_item_1,
+            items
+        ) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                view.setTextColor(0xFF1D1B20.toInt())
+                return view
+            }
+        }
+        container.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
+            val item = items[position]
+            hideUrlEditOverlay()
+            navigate(item)
+        }
+        container.visibility = View.VISIBLE
+    }
+
+    private fun hideSearchSuggestions() {
+        suggestionList?.visibility = View.GONE
+        suggestionList?.adapter = null
     }
 
     private fun showTitleBarMenu() {
@@ -464,7 +584,34 @@ abstract class CommonBrowserMainViewModel(activity: MainActivity): BrowserMainVi
     final override fun onActiveTabChanged(index: Int) {
         super.onActiveTabChanged(index)
         updateTabCountBadge()
+        if (isPageFullScreen) {
+            handlePageFullScreen(false)
+        }
         extractAndApplyWebColor()
+    }
+
+    private var isPageFullScreen = false
+    private var fullscreenPreviousOrientation: Int? = null
+
+    private fun handlePageFullScreen(fullScreen: Boolean) {
+        if (isPageFullScreen == fullScreen) return
+        isPageFullScreen = fullScreen
+        val controller = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+        if (fullScreen) {
+            fullscreenPreviousOrientation = activity.requestedOrientation
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            layoutTopBar.visibility = View.GONE
+            layoutBottomBar.visibility = View.GONE
+        } else {
+            fullscreenPreviousOrientation?.let { activity.requestedOrientation = it }
+            fullscreenPreviousOrientation = null
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            layoutTopBar.visibility = View.VISIBLE
+            layoutBottomBar.visibility = View.VISIBLE
+        }
     }
 
     private fun extractAndApplyWebColor() {

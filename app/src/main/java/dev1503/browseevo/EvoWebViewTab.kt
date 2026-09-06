@@ -76,6 +76,7 @@ class EvoWebViewTab(
     var onNavigateRequested: ((String) -> Unit)? = null
     var onDownloadRequested: ((url: String, filename: String?, contentLength: Long, body: java.io.InputStream?) -> Unit)? = null
     var onContextMenu: ((screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) -> Unit)? = null
+    var onFullScreen: ((fullScreen: Boolean) -> Unit)? = null
 
     val currentUrl: String
         get() = currentSession?.let { urlMap[it] } ?: ""
@@ -314,6 +315,12 @@ class EvoWebViewTab(
 
             override fun onContextMenu(session: GeckoSession, screenX: Int, screenY: Int, element: GeckoSession.ContentDelegate.ContextElement) {
                 onContextMenu?.invoke(screenX, screenY, element)
+            }
+
+            override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+                if (session == currentSession) {
+                    onFullScreen?.invoke(fullScreen)
+                }
             }
         }
     }
